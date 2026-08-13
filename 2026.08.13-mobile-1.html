@@ -1,0 +1,534 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>穴位計算-手機影像端</title>
+  
+  <!-- 1. MediaPipe AI 庫 (模式一：手機端 AI 運算) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+
+  <!-- 2. PeerJS (模式二：無線傳送給電腦) -->
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+
+  <!-- 3. jsQR ( App 內建後鏡頭掃描電腦 QR Code ) -->
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      width: 100vw; height: 100vh;
+      overflow: hidden; background-color: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      position: relative;
+    }
+
+    /* 視訊與 Canvas 區域 */
+    .view-container {
+      width: 100vw; height: 100vh;
+      position: relative; background-color: #000;
+    }
+    video { display: none; }
+    canvas {
+      width: 100%; height: 100%;
+      object-fit: cover;
+    }
+
+    /* 頂部狀態列 */
+    #status_bar {
+      position: absolute; top: 16px; left: 50%;
+      transform: translateX(-50%);
+      padding: 8px 18px; border-radius: 20px;
+      background: rgba(0,0,0,0.85); color: #00FFCC;
+      font-size: 13px; font-weight: bold;
+      backdrop-filter: blur(8px); z-index: 10;
+      border: 1px solid rgba(0, 255, 204, 0.3);
+      text-align: center; white-space: nowrap;
+    }
+
+    /* 模式切換按鈕 */
+    #btn_switch_mode {
+      position: absolute; bottom: 24px; right: 20px;
+      padding: 10px 18px; border-radius: 20px;
+      background: rgba(30, 30, 30, 0.85); color: #FFF;
+      font-size: 14px; font-weight: bold; border: 1px solid #555;
+      backdrop-filter: blur(8px); z-index: 10; cursor: pointer;
+      display: none;
+    }
+
+    /* 模式選擇彈窗 Modal */
+    .modal-overlay {
+      position: absolute; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      background: rgba(0, 0, 0, 0.88);
+      backdrop-filter: blur(10px);
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 24px; z-index: 100;
+    }
+    .modal-title {
+      font-size: 22px; font-weight: bold; color: #00FFCC;
+      margin-bottom: 6px; text-align: center;
+    }
+    .modal-subtitle {
+      font-size: 13px; color: #AAA; margin-bottom: 24px;
+      text-align: center;
+    }
+    .option-card {
+      width: 100%; max-width: 320px;
+      background: #1e1e1e; border: 1px solid #333;
+      border-radius: 16px; padding: 18px; margin-bottom: 16px;
+      cursor: pointer; transition: all 0.2s;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .option-card:active {
+      transform: scale(0.98);
+      background: #2a2a2a; border-color: #00FFCC;
+    }
+    .option-header {
+      font-size: 16px; font-weight: bold; color: #FFF;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .option-desc {
+      font-size: 12px; color: #888; line-height: 1.4;
+    }
+
+    /* 掃碼器對焦框 ( App 內掃電腦 QR 時顯示 ) */
+    #scanner_overlay {
+      position: absolute; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      display: none; flex-direction: column;
+      align-items: center; justify-content: center;
+      z-index: 20; pointer-events: none;
+    }
+    .scan-box {
+      width: 220px; height: 220px;
+      border: 3px solid #00FFCC; border-radius: 16px;
+      box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.6);
+      position: relative;
+    }
+    .scan-line {
+      width: 100%; height: 2px; background: #00FFCC;
+      position: absolute; top: 0; animation: scanAnim 2s infinite ease-in-out;
+      box-shadow: 0 0 8px #00FFCC;
+    }
+    @keyframes scanAnim {
+      0% { top: 0%; }
+      50% { top: 100%; }
+      100% { top: 0%; }
+    }
+    .scan-tip {
+      color: #FFF; margin-top: 24px; font-size: 14px;
+      background: rgba(0,0,0,0.7); padding: 8px 16px; border-radius: 20px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 頂部狀態資訊 -->
+  <div id="status_bar">請選擇 App 運作模式</div>
+
+  <!-- 主畫面區域 -->
+  <div class="view-container">
+    <video id="local_video" playsinline autoplay muted></video>
+    <canvas id="output_canvas"></canvas>
+  </div>
+
+  <!-- 掃碼對焦框 UI -->
+  <div id="scanner_overlay">
+    <div class="scan-box"><div class="scan-line"></div></div>
+    <div class="scan-tip">請將手機對準電腦螢幕上的 QR Code</div>
+  </div>
+
+  <!-- 切換模式按鈕 -->
+  <button id="btn_switch_mode">🔄 重選模式</button>
+
+  <!-- 模式選擇 Modal -->
+  <div id="mode_modal" class="modal-overlay">
+    <div class="modal-title">穴位計算 - 手機 App</div>
+    <div class="modal-subtitle">請選擇您要使用的方式：</div>
+
+    <div class="option-card" id="opt_mode1">
+      <div class="option-header">📱 模式一：手機端顯示</div>
+      <div class="option-desc">直接開啟前鏡頭，在手機畫面上即時進行 AI 臉部穴位辨識與顯示。</div>
+    </div>
+
+    <div class="option-card" id="opt_mode2">
+      <div class="option-header">🖥️ 模式二：傳送給電腦顯示</div>
+      <div class="option-desc">開啟 App 掃描鏡頭對準電腦上的 QR Code，將畫面無線投射給電腦進行 AI 運算。</div>
+    </div>
+  </div>
+
+  <script>
+    const statusBar = document.getElementById('status_bar');
+    const localVideo = document.getElementById('local_video');
+    const canvasElement = document.getElementById('output_canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const modeModal = document.getElementById('mode_modal');
+    const scannerOverlay = document.getElementById('scanner_overlay');
+    const btnSwitchMode = document.getElementById('btn_switch_mode');
+
+    const urlParams = new URLSearchParams(window.location.search);
+    let targetRoomId = urlParams.get('room');
+
+    let currentMode = null; // 'MODE_1', 'MODE_2_SCAN', 'MODE_2_STREAM'
+    let mediaStream = null;
+    let peerInstance = null;
+    let faceMeshInstance = null;
+    let isProcessingMode1 = false;
+    let scanAnimationId = null;
+
+    function resizeCanvas() {
+      canvasElement.width = canvasElement.clientWidth * (window.devicePixelRatio || 1);
+      canvasElement.height = canvasElement.clientHeight * (window.devicePixelRatio || 1);
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // 停止所有相機與連線
+    function stopAllProcesses() {
+      if (scanAnimationId) {
+        cancelAnimationFrame(scanAnimationId);
+        scanAnimationId = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream = null;
+      }
+      if (peerInstance) {
+        peerInstance.destroy();
+        peerInstance = null;
+      }
+      isProcessingMode1 = false;
+      scannerOverlay.style.display = 'none';
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+    }
+
+    // 啟動指定鏡頭 (user 前鏡頭 / environment 後鏡頭)
+    async function startCamera(facingMode = 'user') {
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(track => track.stop());
+      }
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      });
+      localVideo.srcObject = mediaStream;
+      await new Promise(resolve => localVideo.onloadedmetadata = resolve);
+      return mediaStream;
+    }
+
+    // --- 【模式一：手機本機 AI 運算與顯示】 ---
+    let smoothedLandmarks = null;
+    function applyFullMeshSmoothing(rawLandmarks) {
+      if (!smoothedLandmarks || smoothedLandmarks.length !== rawLandmarks.length) {
+        smoothedLandmarks = rawLandmarks.map(pt => ({ x: pt.x, y: pt.y, z: pt.z }));
+        return smoothedLandmarks;
+      }
+      const alphaMin = 0.05, alphaMax = 0.88, k = 140;
+      for (let i = 0; i < rawLandmarks.length; i++) {
+        const raw = rawLandmarks[i], prev = smoothedLandmarks[i];
+        const dist = Math.sqrt((raw.x - prev.x)**2 + (raw.y - prev.y)**2);
+        const dynamicAlpha = alphaMin + (alphaMax - alphaMin) * Math.exp(-k * dist);
+        prev.x = dynamicAlpha * prev.x + (1 - dynamicAlpha) * raw.x;
+        prev.y = dynamicAlpha * prev.y + (1 - dynamicAlpha) * raw.y;
+      }
+      return smoothedLandmarks;
+    }
+
+    async function startMode1() {
+      currentMode = 'MODE_1';
+      stopAllProcesses();
+      statusBar.textContent = "🎥 手機 AI 辨識中...";
+
+      try {
+        await startCamera('user');
+
+        if (!faceMeshInstance) {
+          faceMeshInstance = new FaceMesh({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+          });
+          faceMeshInstance.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+          faceMeshInstance.onResults(onResultsMode1);
+        }
+
+        isProcessingMode1 = true;
+        requestAnimationFrame(processFrameMode1);
+
+      } catch (err) {
+        console.error("模式一相機開啟失敗:", err);
+        statusBar.textContent = "❌ 無法開啟相機，請檢查權限！";
+      }
+    }
+
+    async function processFrameMode1() {
+      if (currentMode === 'MODE_1' && isProcessingMode1 && localVideo.readyState >= 2) {
+        await faceMeshInstance.send({ image: localVideo });
+        requestAnimationFrame(processFrameMode1);
+      }
+    }
+
+    function onResultsMode1(results) {
+      if (currentMode !== 'MODE_1') return;
+      const cw = canvasElement.width, ch = canvasElement.height;
+      const dpr = window.devicePixelRatio || 1;
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, cw, ch);
+
+      if (!results.image) { canvasCtx.restore(); return; }
+
+      const vw = results.image.width, vh = results.image.height;
+      const canvasAspect = cw / ch, imgAspect = vw / vh;
+      let renderW, renderH, offsetX, offsetY;
+
+      if (imgAspect > canvasAspect) {
+        renderH = ch; renderW = vw * (ch / vh);
+        offsetX = (cw - renderW) / 2; offsetY = 0;
+      } else {
+        renderW = cw; renderH = vh * (cw / vw);
+        offsetX = 0; offsetY = (ch - renderH) / 2;
+      }
+
+      // 鏡像繪製
+      canvasCtx.translate(cw, 0);
+      canvasCtx.scale(-1, 1);
+      canvasCtx.drawImage(results.image, cw - offsetX - renderW, offsetY, renderW, renderH);
+
+      if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
+        const landmarks = applyFullMeshSmoothing(results.multiFaceLandmarks[0]);
+          
+        canvasCtx.save();
+        canvasCtx.translate(cw - offsetX - renderW, offsetY);
+        canvasCtx.scale(renderW / cw, renderH / ch);
+        drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, {color: '#C0C0C060', lineWidth: 1.5 * dpr});
+        drawConnectors(canvasCtx, landmarks, FACEMESH_CONTOURS, {color: '#00FFCCB0', lineWidth: 3.0 * dpr});
+        canvasCtx.restore();
+
+        const getPt = (idx) => ({
+          x: Math.round(offsetX + landmarks[idx].x * renderW),
+          y: Math.round(offsetY + landmarks[idx].y * renderH)
+        });
+
+        const yintang = getPt(6);
+        const qingming_L = getPt(133), qingming_R = getPt(362);
+        const zanzhu_L = getPt(55), zanzhu_R = getPt(285);
+        const yuyao_L = getPt(105), yuyao_R = getPt(334);
+        const in_L = getPt(133), out_L = getPt(33);
+        const tongzi_L = { x: Math.round(out_L.x + 0.35 * (out_L.x - in_L.x)), y: Math.round(out_L.y + 0.35 * (out_L.y - in_L.y)) };
+        const in_R = getPt(362), out_R = getPt(263);
+        const tongzi_R = { x: Math.round(out_R.x + 0.35 * (out_R.x - in_R.x)), y: Math.round(out_R.y + 0.35 * (out_R.y - in_R.y)) };
+        const nose = getPt(1);
+        const cL_x = (in_L.x + out_L.x) / 2, cL_y = (in_L.y + out_L.y) / 2;
+        const sibai_L = { x: Math.round(cL_x), y: Math.round(cL_y + (nose.y - cL_y) * 0.45) };
+        const cR_x = (in_R.x + out_R.x) / 2, cR_y = (in_R.y + out_R.y) / 2;
+        const sibai_R = { x: Math.round(cR_x), y: Math.round(cR_y + (nose.y - cR_y) * 0.45) };
+
+        const drawPoint = (label, pt) => {
+          canvasCtx.beginPath();
+          canvasCtx.arc(pt.x, pt.y, 10 * dpr, 0, 2 * Math.PI);
+          canvasCtx.fillStyle = 'rgba(255, 0, 85, 0.35)';
+          canvasCtx.fill();
+
+          canvasCtx.beginPath();
+          canvasCtx.arc(pt.x, pt.y, 4.5 * dpr, 0, 2 * Math.PI);
+          canvasCtx.fillStyle = '#FF0055';
+          canvasCtx.fill();
+
+          canvasCtx.lineWidth = 1.5 * dpr;
+          canvasCtx.strokeStyle = '#FFFFFF';
+          canvasCtx.stroke();
+
+          canvasCtx.save();
+          canvasCtx.translate(pt.x, pt.y);
+          canvasCtx.scale(-1, 1);
+
+          const fontSize = Math.round(12 * dpr);
+          canvasCtx.font = `bold ${fontSize}px Arial, sans-serif`;
+          const textWidth = canvasCtx.measureText(label).width;
+          const paddingX = 6 * dpr, paddingY = 4 * dpr, offsetY = 12 * dpr;
+
+          canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+          canvasCtx.beginPath();
+          canvasCtx.roundRect(-textWidth / 2 - paddingX, -fontSize - offsetY - (paddingY / 2), textWidth + (paddingX * 2), fontSize + paddingY, 4 * dpr);
+          canvasCtx.fill();
+
+          canvasCtx.fillStyle = '#00FFCC';
+          canvasCtx.textAlign = 'center';
+          canvasCtx.fillText(label, 0, -offsetY);
+          canvasCtx.restore();
+        };
+
+        drawPoint("Yintang", yintang);
+        drawPoint("Qingming_L", qingming_L);
+        drawPoint("Qingming_R", qingming_R);
+        drawPoint("Zanzhu_L", zanzhu_L);
+        drawPoint("Zanzhu_R", zanzhu_R);
+        drawPoint("Yuyao_L", yuyao_L);
+        drawPoint("Yuyao_R", yuyao_R);
+        drawPoint("Tongziliao_L", tongzi_L);
+        drawPoint("Tongziliao_R", tongzi_R);
+        drawPoint("Sibai_L", sibai_L);
+        drawPoint("Sibai_R", sibai_R);
+      }
+      canvasCtx.restore();
+    }
+
+    // --- 【模式二：App 開啟後鏡頭掃描電腦 QR Code】 ---
+    async function startMode2Scan() {
+      currentMode = 'MODE_2_SCAN';
+      stopAllProcesses();
+      statusBar.textContent = "🔍 請掃描電腦上的 QR Code...";
+      scannerOverlay.style.display = 'flex';
+
+      try {
+        await startCamera('environment'); // 開啟後鏡頭
+        scanQRCodeFrame();
+      } catch (err) {
+        console.error("無法開啟後鏡頭:", err);
+        statusBar.textContent = "❌ 無法開啟後鏡頭掃描！";
+      }
+    }
+
+    function scanQRCodeFrame() {
+      if (currentMode !== 'MODE_2_SCAN') return;
+
+      const cw = canvasElement.width, ch = canvasElement.height;
+      if (localVideo.readyState >= 2) {
+        canvasCtx.drawImage(localVideo, 0, 0, cw, ch);
+        const imageData = canvasCtx.getImageData(0, 0, cw, ch);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+
+        if (code && code.data) {
+          console.log("成功掃描 QR Code:", code.data);
+          try {
+            const scannedUrl = new URL(code.data);
+            const roomId = scannedUrl.searchParams.get('room');
+            if (roomId) {
+              targetRoomId = roomId;
+              statusBar.textContent = `✅ 成功配對房號：${targetRoomId}`;
+              startMode2Stream(); // 自動切換為前鏡頭串流
+              return;
+            }
+          } catch (e) {
+            console.warn("非有效 URL", code.data);
+          }
+        }
+      }
+      scanAnimationId = requestAnimationFrame(scanQRCodeFrame);
+    }
+
+    // --- 【模式二：前鏡頭串流至電腦】 ---
+    async function startMode2Stream() {
+      currentMode = 'MODE_2_STREAM';
+      stopAllProcesses();
+
+      if (!targetRoomId) {
+        startMode2Scan();
+        return;
+      }
+
+      try {
+        statusBar.textContent = "📡 正在連線至電腦主控台...";
+        const stream = await startCamera('user'); // 切換回前鏡頭
+
+        drawSimplePreview();
+
+        peerInstance = new Peer();
+
+        peerInstance.on('open', () => {
+          const conn = peerInstance.connect(targetRoomId);
+
+          conn.on('open', () => {
+            statusBar.textContent = `🟢 已連線電腦 (${targetRoomId})`;
+          });
+
+          conn.on('data', (data) => {
+            if (data.type === 'RESTART_STREAM') {
+              statusBar.textContent = "🔄 接收到電腦要求，重新連線...";
+              window.location.reload();
+            }
+          });
+
+          peerInstance.call(targetRoomId, stream);
+        });
+
+        peerInstance.on('error', (err) => {
+          console.error("PeerJS 錯誤:", err);
+          statusBar.textContent = "⚠️ 連線失敗，請嘗試刷新";
+        });
+
+      } catch (err) {
+        console.error("模式二串流失敗:", err);
+        statusBar.textContent = "❌ 前鏡頭開啟失敗！";
+      }
+    }
+
+    function drawSimplePreview() {
+      if (currentMode !== 'MODE_2_STREAM') return;
+      const cw = canvasElement.width, ch = canvasElement.height;
+      
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, cw, ch);
+      
+      const vw = localVideo.videoWidth, vh = localVideo.videoHeight;
+      if (vw && vh) {
+        const canvasAspect = cw / ch, imgAspect = vw / vh;
+        let renderW, renderH, offsetX, offsetY;
+
+        if (imgAspect > canvasAspect) {
+          renderH = ch; renderW = vw * (ch / vh);
+          offsetX = (cw - renderW) / 2; offsetY = 0;
+        } else {
+          renderW = cw; renderH = vh * (cw / vw);
+          offsetX = 0; offsetY = (ch - renderH) / 2;
+        }
+
+        canvasCtx.translate(cw, 0);
+        canvasCtx.scale(-1, 1);
+        canvasCtx.drawImage(localVideo, cw - offsetX - renderW, offsetY, renderW, renderH);
+      }
+      canvasCtx.restore();
+
+      if (currentMode === 'MODE_2_STREAM') {
+        requestAnimationFrame(drawSimplePreview);
+      }
+    }
+
+    // --- 初始化邏輯 ---
+    if (targetRoomId) {
+      // 💡 如果手機是用「原生相機掃 QR Code」打開網址（帶有 room 參數）
+      modeModal.style.display = 'none';
+      btnSwitchMode.style.display = 'block';
+      startMode2Stream();
+    } else {
+      // 💡 如果直接開啟手機 App 網頁，顯示選擇視窗
+      modeModal.style.display = 'flex';
+      btnSwitchMode.style.display = 'none';
+    }
+
+    // UI 按鈕事件
+    document.getElementById('opt_mode1').addEventListener('click', () => {
+      modeModal.style.display = 'none';
+      btnSwitchMode.style.display = 'block';
+      startMode1();
+    });
+
+    document.getElementById('opt_mode2').addEventListener('click', () => {
+      modeModal.style.display = 'none';
+      btnSwitchMode.style.display = 'block';
+      startMode2Scan();
+    });
+
+    btnSwitchMode.addEventListener('click', () => {
+      stopAllProcesses();
+      btnSwitchMode.style.display = 'none';
+      modeModal.style.display = 'flex';
+      statusBar.textContent = "請選擇 App 運作模式";
+    });
+  </script>
+</body>
+</html>
