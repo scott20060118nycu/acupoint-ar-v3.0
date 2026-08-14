@@ -168,6 +168,7 @@
     let currentMode = null;
     let mediaStream = null;
     let peerInstance = null;
+    let dataConn = null;
     let faceMeshInstance = null;
     let isProcessingMode1 = false;
     let scanAnimationId = null;
@@ -185,6 +186,16 @@
         cancelAnimationFrame(scanAnimationId);
         scanAnimationId = null;
       }
+
+      // 通知電腦端停止串流並清空畫面，防止定格
+      if (dataConn && dataConn.open) {
+        try {
+          dataConn.send({ type: 'STOP_STREAM' });
+        } catch (e) {
+          console.warn("無法發送 STOP_STREAM 訊號", e);
+        }
+      }
+
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
         mediaStream = null;
@@ -193,6 +204,8 @@
         peerInstance.destroy();
         peerInstance = null;
       }
+      dataConn = null;
+
       isProcessingMode1 = false;
       scannerOverlay.style.display = 'none';
       canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
@@ -388,10 +401,8 @@
 
       const cw = canvasElement.width, ch = canvasElement.height;
       if (localVideo.readyState >= 2) {
-        // 全速繪製高畫質即時相機預覽 (維持流暢)
         canvasCtx.drawImage(localVideo, 0, 0, cw, ch);
 
-        // 每 150 毫秒才對降採樣後的低解析度影像解析一次 QR Code，完全解決卡頓問題
         if (timestamp - lastScanTime > 150) {
           lastScanTime = timestamp;
 
@@ -439,13 +450,13 @@
         peerInstance = new Peer();
 
         peerInstance.on('open', () => {
-          const conn = peerInstance.connect(targetRoomId);
+          dataConn = peerInstance.connect(targetRoomId);
 
-          conn.on('open', () => {
+          dataConn.on('open', () => {
             statusBar.textContent = `已連線電腦 (${targetRoomId})`;
           });
 
-          conn.on('data', (data) => {
+          dataConn.on('data', (data) => {
             if (data.type === 'RESTART_STREAM') {
               statusBar.textContent = "接收到電腦要求，重新連線...";
               window.location.reload();
