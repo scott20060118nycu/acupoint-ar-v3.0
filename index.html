@@ -31,18 +31,7 @@
       width: 100vw; height: 100vh;
       position: relative; background-color: #000;
     }
-    
-    /* 關鍵修復：不可使用 display: none，否則 WebView 會停止解碼鏡頭 */
-    video {
-      position: absolute;
-      top: -9999px;
-      left: -9999px;
-      width: 1px;
-      height: 1px;
-      opacity: 0;
-      pointer-events: none;
-    }
-    
+    video { display: none; }
     canvas {
       width: 100%; height: 100%;
       object-fit: cover;
@@ -167,6 +156,12 @@
     const scannerOverlay = document.getElementById('scanner_overlay');
     const btnSwitchMode = document.getElementById('btn_switch_mode');
 
+    // 建立輕量專用 Canvas 供高效能 QR 掃描使用
+    const scanCanvas = document.createElement('canvas');
+    const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    scanCanvas.width = 320;
+    scanCanvas.height = 320;
+
     const urlParams = new URLSearchParams(window.location.search);
     let targetRoomId = urlParams.get('room');
 
@@ -176,6 +171,7 @@
     let faceMeshInstance = null;
     let isProcessingMode1 = false;
     let scanAnimationId = null;
+    let lastScanTime = 0;
 
     function resizeCanvas() {
       canvasElement.width = canvasElement.clientWidth * (window.devicePixelRatio || 1);
@@ -206,20 +202,12 @@
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
       }
-      
-      const constraints = {
-        video: {
-          facingMode: { ideal: facingMode }
-        },
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false
-      };
-
-      mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+      });
       localVideo.srcObject = mediaStream;
-      
-      // 明確執行 play() 以供 WebView 解碼
-      await localVideo.play();
-      
+      await new Promise(resolve => localVideo.onloadedmetadata = resolve);
       return mediaStream;
     }
 
@@ -269,8 +257,6 @@
     async function processFrameMode1() {
       if (currentMode === 'MODE_1' && isProcessingMode1 && localVideo.readyState >= 2) {
         await faceMeshInstance.send({ image: localVideo });
-        requestAnimationFrame(processFrameMode1);
-      } else if (currentMode === 'MODE_1' && isProcessingMode1) {
         requestAnimationFrame(processFrameMode1);
       }
     }
@@ -389,34 +375,45 @@
 
       try {
         await startCamera('environment');
-        scanQRCodeFrame();
+        lastScanTime = 0;
+        scanQRCodeFrame(performance.now());
       } catch (err) {
         console.error("無法開啟後鏡頭:", err);
         statusBar.textContent = "無法開啟後鏡頭掃描";
       }
     }
 
-    function scanQRCodeFrame() {
+    function scanQRCodeFrame(timestamp) {
       if (currentMode !== 'MODE_2_SCAN') return;
 
       const cw = canvasElement.width, ch = canvasElement.height;
       if (localVideo.readyState >= 2) {
+        // 全速繪製高畫質即時相機預覽 (維持流暢)
         canvasCtx.drawImage(localVideo, 0, 0, cw, ch);
-        const imageData = canvasCtx.getImageData(0, 0, cw, ch);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
 
-        if (code && code.data) {
-          try {
-            const scannedUrl = new URL(code.data);
-            const roomId = scannedUrl.searchParams.get('room');
-            if (roomId) {
-              targetRoomId = roomId;
-              statusBar.textContent = `成功配對房號：${targetRoomId}`;
-              startMode2Stream();
-              return;
+        // 每 150 毫秒才對降採樣後的低解析度影像解析一次 QR Code，完全解決卡頓問題
+        if (timestamp - lastScanTime > 150) {
+          lastScanTime = timestamp;
+
+          scanCtx.drawImage(localVideo, 0, 0, scanCanvas.width, scanCanvas.height);
+          const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+          const code = jsQR(imageData.data, scanCanvas.width, scanCanvas.height, {
+            inversionAttempts: "dontInvert"
+          });
+
+          if (code && code.data) {
+            try {
+              const scannedUrl = new URL(code.data);
+              const roomId = scannedUrl.searchParams.get('room');
+              if (roomId) {
+                targetRoomId = roomId;
+                statusBar.textContent = `成功配對房號：${targetRoomId}`;
+                startMode2Stream();
+                return;
+              }
+            } catch (e) {
+              console.warn("非有效 URL", code.data);
             }
-          } catch (e) {
-            console.warn("非有效 URL", code.data);
           }
         }
       }
