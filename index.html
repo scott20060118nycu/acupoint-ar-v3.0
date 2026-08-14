@@ -31,7 +31,18 @@
       width: 100vw; height: 100vh;
       position: relative; background-color: #000;
     }
-    video { display: none; }
+    
+    /* 關鍵修復：不可使用 display: none，否則 WebView 會停止解碼鏡頭 */
+    video {
+      position: absolute;
+      top: -9999px;
+      left: -9999px;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+    }
+    
     canvas {
       width: 100%; height: 100%;
       object-fit: cover;
@@ -195,12 +206,20 @@
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
       }
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+      
+      const constraints = {
+        video: {
+          facingMode: { ideal: facingMode }
+        },
         audio: false
-      });
+      };
+
+      mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
       localVideo.srcObject = mediaStream;
-      await new Promise(resolve => localVideo.onloadedmetadata = resolve);
+      
+      // 明確執行 play() 以供 WebView 解碼
+      await localVideo.play();
+      
       return mediaStream;
     }
 
@@ -250,6 +269,8 @@
     async function processFrameMode1() {
       if (currentMode === 'MODE_1' && isProcessingMode1 && localVideo.readyState >= 2) {
         await faceMeshInstance.send({ image: localVideo });
+        requestAnimationFrame(processFrameMode1);
+      } else if (currentMode === 'MODE_1' && isProcessingMode1) {
         requestAnimationFrame(processFrameMode1);
       }
     }
