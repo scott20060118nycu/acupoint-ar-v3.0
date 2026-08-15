@@ -302,10 +302,14 @@
       const alphaMin = 0.05, alphaMax = 0.88, k = 140;
       for (let i = 0; i < rawLandmarks.length; i++) {
         const raw = rawLandmarks[i], prev = smoothedLandmarks[i];
-        const dist = Math.sqrt((raw.x - prev.x)**2 + (raw.y - prev.y)**2);
+        const dx = raw.x - prev.x, dy = raw.y - prev.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
         const dynamicAlpha = alphaMin + (alphaMax - alphaMin) * Math.exp(-k * dist);
         prev.x = dynamicAlpha * prev.x + (1 - dynamicAlpha) * raw.x;
         prev.y = dynamicAlpha * prev.y + (1 - dynamicAlpha) * raw.y;
+        if (raw.z !== undefined && prev.z !== undefined) {
+          prev.z = dynamicAlpha * prev.z + (1 - dynamicAlpha) * raw.z;
+        }
       }
       return smoothedLandmarks;
     }
@@ -322,7 +326,7 @@
           faceMeshInstance = new FaceMesh({
             locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
           });
-          faceMeshInstance.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.7, minTrackingConfidence: 0.7 });
+          faceMeshInstance.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.9, minTrackingConfidence: 0.9 });
           faceMeshInstance.onResults(onResultsMode1);
         }
 
@@ -364,6 +368,7 @@
         offsetX = 0; offsetY = (ch - renderH) / 2;
       }
 
+      // 水平鏡像翻轉繪製
       canvasCtx.translate(cw, 0);
       canvasCtx.scale(-1, 1);
       canvasCtx.drawImage(results.image, cw - offsetX - renderW, offsetY, renderW, renderH);
@@ -371,44 +376,92 @@
       if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
         const landmarks = applyFullMeshSmoothing(results.multiFaceLandmarks[0]);
           
+        // 繪製 3D FaceMesh 網格
         canvasCtx.save();
         canvasCtx.translate(cw - offsetX - renderW, offsetY);
         canvasCtx.scale(renderW / cw, renderH / ch);
-        drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, {color: '#C0C0C060', lineWidth: 1.5 * dpr});
-        drawConnectors(canvasCtx, landmarks, FACEMESH_CONTOURS, {color: '#00FFCCB0', lineWidth: 3.0 * dpr});
+        drawConnectors(canvasCtx, landmarks, FACEMESH_TESSELATION, {color: '#C0C0C060', lineWidth: 1.8 * dpr});
+        drawConnectors(canvasCtx, landmarks, FACEMESH_CONTOURS, {color: '#00FFCCB0', lineWidth: 3.5 * dpr});
         canvasCtx.restore();
 
         const getPt = (idx) => ({
-          x: Math.round(offsetX + landmarks[idx].x * renderW),
-          y: Math.round(offsetY + landmarks[idx].y * renderH)
+          x: offsetX + landmarks[idx].x * renderW,
+          y: offsetY + landmarks[idx].y * renderH
         });
 
-        const yintang = getPt(6);
-        const qingming_L = getPt(133), qingming_R = getPt(362);
-        const zanzhu_L = getPt(55), zanzhu_R = getPt(285);
-        const yuyao_L = getPt(105), yuyao_R = getPt(334);
-        const in_L = getPt(133), out_L = getPt(33);
-        const tongzi_L = { x: Math.round(out_L.x + 0.35 * (out_L.x - in_L.x)), y: Math.round(out_L.y + 0.35 * (out_L.y - in_L.y)) };
-        const in_R = getPt(362), out_R = getPt(263);
-        const tongzi_R = { x: Math.round(out_R.x + 0.35 * (out_R.x - in_R.x)), y: Math.round(out_R.y + 0.35 * (out_R.y - in_R.y)) };
+        // 取得鼻尖、瞳孔與眼睛關鍵點
         const nose = getPt(1);
-        const cL_x = (in_L.x + out_L.x) / 2, cL_y = (in_L.y + out_L.y) / 2;
-        const sibai_L = { x: Math.round(cL_x), y: Math.round(cL_y + (nose.y - cL_y) * 0.45) };
-        const cR_x = (in_R.x + out_R.x) / 2, cR_y = (in_R.y + out_R.y) / 2;
-        const sibai_R = { x: Math.round(cR_x), y: Math.round(cR_y + (nose.y - cR_y) * 0.45) };
+        const leftPupil = landmarks[468] ? getPt(468) : getPt(145);
+        const rightPupil = landmarks[473] ? getPt(473) : getPt(374);
+        const leftInnerCanthus = getPt(133);
+        const rightInnerCanthus = getPt(362);
+        const leftOuterCanthus = getPt(33);
+        const rightOuterCanthus = getPt(263);
 
+        // 🔍 轉頭遮蔽判定
+        const distL = Math.hypot(leftOuterCanthus.x - nose.x, leftOuterCanthus.y - nose.y);
+        const distR = Math.hypot(rightOuterCanthus.x - nose.x, rightOuterCanthus.y - nose.y);
+        const totalDist = distL + distR || 1;
+
+        const ratioL = distL / totalDist;
+        const ratioR = distR / totalDist;
+
+        const showLeft = ratioL >= 0.32;
+        const showRight = ratioR >= 0.32;
+
+        // 📐 中醫同身寸動態校正演算法
+        const ipdDistance = Math.hypot(rightPupil.x - leftPupil.x, rightPupil.y - leftPupil.y);
+        const innerCanthusDistance = Math.hypot(rightInnerCanthus.x - leftInnerCanthus.x, rightInnerCanthus.y - leftInnerCanthus.y);
+        const cunInPixels = ((ipdDistance / 3.0) + innerCanthusDistance) / 2.0;
+
+        // 面部姿態自適應單位向量
+        const dx = rightPupil.x - leftPupil.x;
+        const dy = rightPupil.y - leftPupil.y;
+        const len = Math.hypot(dx, dy) || 1;
+        const uH = { x: dx / len, y: dy / len };
+        const uV = { x: -uH.y, y: uH.x };
+
+        const offsetByCun = (anchor, hCun, vCun) => ({
+          x: Math.round(anchor.x + (hCun * uH.x + vCun * uV.x) * cunInPixels),
+          y: Math.round(anchor.y + (hCun * uH.y + vCun * uV.y) * cunInPixels)
+        });
+
+        // 精準計算穴位座標
+        const yintang = {
+          x: Math.round((getPt(55).x + getPt(285).x) / 2),
+          y: Math.round((getPt(55).y + getPt(285).y) / 2)
+        };
+        const qingming_L = offsetByCun(leftInnerCanthus, -0.1, -0.1);
+        const qingming_R = offsetByCun(rightInnerCanthus, 0.1, -0.1);
+        const zanzhu_L = { x: Math.round(getPt(55).x), y: Math.round(getPt(55).y) };
+        const zanzhu_R = { x: Math.round(getPt(285).x), y: Math.round(getPt(285).y) };
+        const yuyao_L = { x: Math.round(getPt(105).x), y: Math.round(getPt(105).y) };
+        const yuyao_R = { x: Math.round(getPt(334).x), y: Math.round(getPt(334).y) };
+        const tongzi_L = offsetByCun(leftOuterCanthus, -0.5, 0);
+        const tongzi_R = offsetByCun(rightOuterCanthus, 0.5, 0);
+        const sibai_L = offsetByCun(leftPupil, 0, 1.0);
+        const sibai_R = offsetByCun(rightPupil, 0, 1.0);
+
+        // 🌟 新增穴位：迎香、地倉、承漿
+        const yingxiang_L = getPt(102);
+        const yingxiang_R = getPt(331);
+        const dicang_L = offsetByCun(getPt(61), -0.4, 0);
+        const dicang_R = offsetByCun(getPt(291), 0.4, 0);
+        const chengjiang = getPt(18);
+
+        // 標籤繪製函數
         const drawPoint = (label, pt) => {
           canvasCtx.beginPath();
-          canvasCtx.arc(pt.x, pt.y, 10 * dpr, 0, 2 * Math.PI);
+          canvasCtx.arc(pt.x, pt.y, 14 * dpr, 0, 2 * Math.PI);
           canvasCtx.fillStyle = 'rgba(255, 0, 85, 0.35)';
           canvasCtx.fill();
 
           canvasCtx.beginPath();
-          canvasCtx.arc(pt.x, pt.y, 4.5 * dpr, 0, 2 * Math.PI);
+          canvasCtx.arc(pt.x, pt.y, 6.5 * dpr, 0, 2 * Math.PI);
           canvasCtx.fillStyle = '#FF0055';
           canvasCtx.fill();
 
-          canvasCtx.lineWidth = 1.5 * dpr;
+          canvasCtx.lineWidth = 2.5 * dpr;
           canvasCtx.strokeStyle = '#FFFFFF';
           canvasCtx.stroke();
 
@@ -416,14 +469,14 @@
           canvasCtx.translate(pt.x, pt.y);
           canvasCtx.scale(-1, 1);
 
-          const fontSize = Math.round(12 * dpr);
+          const fontSize = Math.round(14 * dpr);
           canvasCtx.font = `bold ${fontSize}px Arial, sans-serif`;
           const textWidth = canvasCtx.measureText(label).width;
-          const paddingX = 6 * dpr, paddingY = 4 * dpr, offsetY = 12 * dpr;
+          const paddingX = 8 * dpr, paddingY = 5 * dpr, offsetY = 14 * dpr;
 
           canvasCtx.fillStyle = 'rgba(0, 0, 0, 0.75)';
           canvasCtx.beginPath();
-          canvasCtx.roundRect(-textWidth / 2 - paddingX, -fontSize - offsetY - (paddingY / 2), textWidth + (paddingX * 2), fontSize + paddingY, 4 * dpr);
+          canvasCtx.roundRect(-textWidth / 2 - paddingX, -fontSize - offsetY - (paddingY / 2), textWidth + (paddingX * 2), fontSize + paddingY, 5 * dpr);
           canvasCtx.fill();
 
           canvasCtx.fillStyle = '#00FFCC';
@@ -432,17 +485,36 @@
           canvasCtx.restore();
         };
 
-        drawPoint("Yintang", yintang);
-        drawPoint("Qingming_L", qingming_L);
-        drawPoint("Qingming_R", qingming_R);
-        drawPoint("Zanzhu_L", zanzhu_L);
-        drawPoint("Zanzhu_R", zanzhu_R);
-        drawPoint("Yuyao_L", yuyao_L);
-        drawPoint("Yuyao_R", yuyao_R);
-        drawPoint("Tongziliao_L", tongzi_L);
-        drawPoint("Tongziliao_R", tongzi_R);
-        drawPoint("Sibai_L", sibai_L);
-        drawPoint("Sibai_R", sibai_R);
+        // 中線穴位繪製
+        if (ratioL >= 0.22 && ratioR >= 0.22) {
+          drawPoint("Yintang", yintang);
+          drawPoint("Chengjiang", chengjiang);
+        }
+
+        // 左側穴位繪製
+        if (showLeft) {
+          drawPoint("Qingming_L", qingming_L);
+          drawPoint("Zanzhu_L", zanzhu_L);
+          drawPoint("Yuyao_L", yuyao_L);
+          drawPoint("Tongziliao_L", tongzi_L);
+          drawPoint("Sibai_L", sibai_L);
+          drawPoint("Yingxiang_L", yingxiang_L);
+          drawPoint("Dicang_L", dicang_L);
+        }
+
+        // 右側穴位繪製
+        if (showRight) {
+          drawPoint("Qingming_R", qingming_R);
+          drawPoint("Zanzhu_R", zanzhu_R);
+          drawPoint("Yuyao_R", yuyao_R);
+          drawPoint("Tongziliao_R", tongzi_R);
+          drawPoint("Sibai_R", sibai_R);
+          drawPoint("Yingxiang_R", yingxiang_R);
+          drawPoint("Dicang_R", dicang_R);
+        }
+
+      } else {
+        smoothedLandmarks = null;
       }
       canvasCtx.restore();
     }
@@ -468,10 +540,8 @@
       if (currentMode !== 'MODE_2_SCAN') return;
 
       if (localVideo.readyState >= 2 && localVideo.videoWidth > 0) {
-        // 即時繪製相機畫面至全螢幕 Canvas
         drawVideoToCanvas(localVideo, canvasElement, canvasCtx, false);
 
-        // 每 150ms 解析一次低解析度影像，確保掃碼順暢不卡頓
         if (timestamp - lastScanTime > 150) {
           lastScanTime = timestamp;
 
