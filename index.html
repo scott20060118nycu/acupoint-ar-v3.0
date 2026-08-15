@@ -5,15 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
   <title>穴位計算-手機影像端</title>
   
-  <!-- 1. MediaPipe AI 庫 (模式一：手機端 AI 運算) -->
+  <!-- MediaPipe -->
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
 
-  <!-- 2. PeerJS (模式二：無線傳送給電腦) -->
+  <!-- PeerJS -->
   <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
 
-  <!-- 3. jsQR ( App 內建後鏡頭掃描電腦 QR Code ) -->
+  <!-- jsQR -->
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 
   <style>
@@ -31,7 +31,16 @@
       width: 100vw; height: 100vh;
       position: relative; background-color: #000;
     }
-    video { display: none; }
+
+    /* 解決手機黑屏關鍵：不可使用 display: none，改用背景隱藏 */
+    video {
+      position: absolute;
+      top: 0; left: 0;
+      width: 1px; height: 1px;
+      opacity: 0.01;
+      pointer-events: none;
+    }
+
     canvas {
       width: 100%; height: 100%;
       object-fit: cover;
@@ -82,7 +91,7 @@
       background: #1e1e1e; border: 1px solid #333;
       border-radius: 16px; padding: 18px; margin-bottom: 16px;
       cursor: pointer; transition: all 0.2s;
-      display: flex; flex-direction: column; gap: 6px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
     }
     .option-card:active {
       transform: scale(0.98);
@@ -90,13 +99,10 @@
     }
     .option-header {
       font-size: 16px; font-weight: bold; color: #FFF;
-      display: flex; align-items: center; gap: 8px;
-    }
-    .option-desc {
-      font-size: 12px; color: #888; line-height: 1.4;
+      text-align: center;
     }
 
-    /* 掃碼器對焦框 ( App 內掃電腦 QR 時顯示 ) */
+    /* 掃碼對焦框 */
     #scanner_overlay {
       position: absolute; top: 0; left: 0;
       width: 100vw; height: 100vh;
@@ -109,16 +115,6 @@
       border: 3px solid #00FFCC; border-radius: 16px;
       box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.6);
       position: relative;
-    }
-    .scan-line {
-      width: 100%; height: 2px; background: #00FFCC;
-      position: absolute; top: 0; animation: scanAnim 2s infinite ease-in-out;
-      box-shadow: 0 0 8px #00FFCC;
-    }
-    @keyframes scanAnim {
-      0% { top: 0%; }
-      50% { top: 100%; }
-      100% { top: 0%; }
     }
     .scan-tip {
       color: #FFF; margin-top: 24px; font-size: 14px;
@@ -139,12 +135,12 @@
 
   <!-- 掃碼對焦框 UI -->
   <div id="scanner_overlay">
-    <div class="scan-box"><div class="scan-line"></div></div>
+    <div class="scan-box"></div>
     <div class="scan-tip">請將手機對準電腦螢幕上的 QR Code</div>
   </div>
 
   <!-- 切換模式按鈕 -->
-  <button id="btn_switch_mode">🔄 重選模式</button>
+  <button id="btn_switch_mode">切換模式</button>
 
   <!-- 模式選擇 Modal -->
   <div id="mode_modal" class="modal-overlay">
@@ -152,13 +148,11 @@
     <div class="modal-subtitle">請選擇您要使用的方式：</div>
 
     <div class="option-card" id="opt_mode1">
-      <div class="option-header">📱 模式一：手機端顯示</div>
-      <div class="option-desc">直接開啟前鏡頭，在手機畫面上即時進行 AI 臉部穴位辨識與顯示。</div>
+      <div class="option-header">模式一：手機端顯示</div>
     </div>
 
     <div class="option-card" id="opt_mode2">
-      <div class="option-header">🖥️ 模式二：傳送給電腦顯示</div>
-      <div class="option-desc">開啟 App 掃描鏡頭對準電腦上的 QR Code，將畫面無線投射給電腦進行 AI 運算。</div>
+      <div class="option-header">模式二：傳送給電腦顯示</div>
     </div>
   </div>
 
@@ -171,15 +165,23 @@
     const scannerOverlay = document.getElementById('scanner_overlay');
     const btnSwitchMode = document.getElementById('btn_switch_mode');
 
+    // 建立輕量專用 Canvas 供高效能 QR 掃描使用
+    const scanCanvas = document.createElement('canvas');
+    const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+    scanCanvas.width = 320;
+    scanCanvas.height = 320;
+
     const urlParams = new URLSearchParams(window.location.search);
     let targetRoomId = urlParams.get('room');
 
-    let currentMode = null; // 'MODE_1', 'MODE_2_SCAN', 'MODE_2_STREAM'
+    let currentMode = null;
     let mediaStream = null;
     let peerInstance = null;
+    let dataConn = null;
     let faceMeshInstance = null;
     let isProcessingMode1 = false;
     let scanAnimationId = null;
+    let lastScanTime = 0;
 
     function resizeCanvas() {
       canvasElement.width = canvasElement.clientWidth * (window.devicePixelRatio || 1);
@@ -188,12 +190,21 @@
     window.addEventListener('resize', resizeCanvas);
     resizeCanvas();
 
-    // 停止所有相機與連線
     function stopAllProcesses() {
       if (scanAnimationId) {
         cancelAnimationFrame(scanAnimationId);
         scanAnimationId = null;
       }
+
+      // 通知電腦端停止串流並清空畫面
+      if (dataConn && dataConn.open) {
+        try {
+          dataConn.send({ type: 'STOP_STREAM' });
+        } catch (e) {
+          console.warn("無法發送 STOP_STREAM 訊號", e);
+        }
+      }
+
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
         mediaStream = null;
@@ -202,26 +213,86 @@
         peerInstance.destroy();
         peerInstance = null;
       }
+      dataConn = null;
+
       isProcessingMode1 = false;
       scannerOverlay.style.display = 'none';
       canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
     }
 
-    // 啟動指定鏡頭 (user 前鏡頭 / environment 後鏡頭)
+    // 啟動相機並確保畫面解碼與播放
     async function startCamera(facingMode = 'user') {
       if (mediaStream) {
         mediaStream.getTracks().forEach(track => track.stop());
+        mediaStream = null;
       }
-      mediaStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
-        audio: false
-      });
+
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: facingMode },
+          audio: false
+        });
+      } catch (err) {
+        console.warn("無法取得指定鏡頭，退回通用設定", err);
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false
+        });
+      }
+
       localVideo.srcObject = mediaStream;
-      await new Promise(resolve => localVideo.onloadedmetadata = resolve);
+
+      try {
+        await localVideo.play();
+      } catch (e) {
+        console.warn("Video play error:", e);
+      }
+
+      await new Promise((resolve) => {
+        if (localVideo.videoWidth > 0) {
+          resolve();
+        } else {
+          localVideo.onloadedmetadata = () => resolve();
+        }
+      });
+
       return mediaStream;
     }
 
-    // --- 【模式一：手機本機 AI 運算與顯示】 ---
+    // 畫面的通用縮放繪製函數
+    function drawVideoToCanvas(video, canvas, ctx, mirror = false) {
+      const cw = canvas.width, ch = canvas.height;
+      const vw = video.videoWidth, vh = video.videoHeight;
+      if (!vw || !vh) return null;
+
+      const canvasAspect = cw / ch;
+      const imgAspect = vw / vh;
+      let renderW, renderH, offsetX, offsetY;
+
+      if (imgAspect > canvasAspect) {
+        renderH = ch; renderW = vw * (ch / vh);
+        offsetX = (cw - renderW) / 2; offsetY = 0;
+      } else {
+        renderW = cw; renderH = vh * (cw / vw);
+        offsetX = 0; offsetY = (ch - renderH) / 2;
+      }
+
+      ctx.save();
+      ctx.clearRect(0, 0, cw, ch);
+
+      if (mirror) {
+        ctx.translate(cw, 0);
+        ctx.scale(-1, 1);
+        ctx.drawImage(video, cw - offsetX - renderW, offsetY, renderW, renderH);
+      } else {
+        ctx.drawImage(video, offsetX, offsetY, renderW, renderH);
+      }
+
+      ctx.restore();
+      return { renderW, renderH, offsetX, offsetY };
+    }
+
+    // --- 模式一：手機端顯示 ---
     let smoothedLandmarks = null;
     function applyFullMeshSmoothing(rawLandmarks) {
       if (!smoothedLandmarks || smoothedLandmarks.length !== rawLandmarks.length) {
@@ -242,7 +313,7 @@
     async function startMode1() {
       currentMode = 'MODE_1';
       stopAllProcesses();
-      statusBar.textContent = "🎥 手機 AI 辨識中...";
+      statusBar.textContent = "手機 AI 辨識中...";
 
       try {
         await startCamera('user');
@@ -260,7 +331,7 @@
 
       } catch (err) {
         console.error("模式一相機開啟失敗:", err);
-        statusBar.textContent = "❌ 無法開啟相機，請檢查權限！";
+        statusBar.textContent = "無法開啟相機，請檢查權限";
       }
     }
 
@@ -293,7 +364,6 @@
         offsetX = 0; offsetY = (ch - renderH) / 2;
       }
 
-      // 鏡像繪製
       canvasCtx.translate(cw, 0);
       canvasCtx.scale(-1, 1);
       canvasCtx.drawImage(results.image, cw - offsetX - renderW, offsetY, renderW, renderH);
@@ -377,51 +447,60 @@
       canvasCtx.restore();
     }
 
-    // --- 【模式二：App 開啟後鏡頭掃描電腦 QR Code】 ---
+    // --- 模式二：掃描 QR Code ---
     async function startMode2Scan() {
       currentMode = 'MODE_2_SCAN';
       stopAllProcesses();
-      statusBar.textContent = "🔍 請掃描電腦上的 QR Code...";
+      statusBar.textContent = "請掃描電腦上的 QR Code...";
       scannerOverlay.style.display = 'flex';
 
       try {
-        await startCamera('environment'); // 開啟後鏡頭
-        scanQRCodeFrame();
+        await startCamera('environment');
+        lastScanTime = 0;
+        scanQRCodeFrame(performance.now());
       } catch (err) {
         console.error("無法開啟後鏡頭:", err);
-        statusBar.textContent = "❌ 無法開啟後鏡頭掃描！";
+        statusBar.textContent = "無法開啟後鏡頭掃描";
       }
     }
 
-    function scanQRCodeFrame() {
+    function scanQRCodeFrame(timestamp) {
       if (currentMode !== 'MODE_2_SCAN') return;
 
-      const cw = canvasElement.width, ch = canvasElement.height;
-      if (localVideo.readyState >= 2) {
-        canvasCtx.drawImage(localVideo, 0, 0, cw, ch);
-        const imageData = canvasCtx.getImageData(0, 0, cw, ch);
-        const code = jsQR(imageData.data, imageData.width, imageData.height);
+      if (localVideo.readyState >= 2 && localVideo.videoWidth > 0) {
+        // 即時繪製相機畫面至全螢幕 Canvas
+        drawVideoToCanvas(localVideo, canvasElement, canvasCtx, false);
 
-        if (code && code.data) {
-          console.log("成功掃描 QR Code:", code.data);
-          try {
-            const scannedUrl = new URL(code.data);
-            const roomId = scannedUrl.searchParams.get('room');
-            if (roomId) {
-              targetRoomId = roomId;
-              statusBar.textContent = `✅ 成功配對房號：${targetRoomId}`;
-              startMode2Stream(); // 自動切換為前鏡頭串流
-              return;
+        // 每 150ms 解析一次低解析度影像，確保掃碼順暢不卡頓
+        if (timestamp - lastScanTime > 150) {
+          lastScanTime = timestamp;
+
+          scanCtx.drawImage(localVideo, 0, 0, scanCanvas.width, scanCanvas.height);
+          const imageData = scanCtx.getImageData(0, 0, scanCanvas.width, scanCanvas.height);
+          const code = jsQR(imageData.data, scanCanvas.width, scanCanvas.height, {
+            inversionAttempts: "dontInvert"
+          });
+
+          if (code && code.data) {
+            try {
+              const scannedUrl = new URL(code.data);
+              const roomId = scannedUrl.searchParams.get('room');
+              if (roomId) {
+                targetRoomId = roomId;
+                statusBar.textContent = `成功配對房號：${targetRoomId}`;
+                startMode2Stream();
+                return;
+              }
+            } catch (e) {
+              console.warn("非有效 URL", code.data);
             }
-          } catch (e) {
-            console.warn("非有效 URL", code.data);
           }
         }
       }
       scanAnimationId = requestAnimationFrame(scanQRCodeFrame);
     }
 
-    // --- 【模式二：前鏡頭串流至電腦】 ---
+    // --- 模式二：串流至電腦 ---
     async function startMode2Stream() {
       currentMode = 'MODE_2_STREAM';
       stopAllProcesses();
@@ -432,23 +511,23 @@
       }
 
       try {
-        statusBar.textContent = "📡 正在連線至電腦主控台...";
-        const stream = await startCamera('user'); // 切換回前鏡頭
+        statusBar.textContent = "正在連線至電腦主控台...";
+        const stream = await startCamera('user');
 
         drawSimplePreview();
 
         peerInstance = new Peer();
 
         peerInstance.on('open', () => {
-          const conn = peerInstance.connect(targetRoomId);
+          dataConn = peerInstance.connect(targetRoomId);
 
-          conn.on('open', () => {
-            statusBar.textContent = `🟢 已連線電腦 (${targetRoomId})`;
+          dataConn.on('open', () => {
+            statusBar.textContent = `已連線電腦 (${targetRoomId})`;
           });
 
-          conn.on('data', (data) => {
+          dataConn.on('data', (data) => {
             if (data.type === 'RESTART_STREAM') {
-              statusBar.textContent = "🔄 接收到電腦要求，重新連線...";
+              statusBar.textContent = "接收到電腦要求，重新連線...";
               window.location.reload();
             }
           });
@@ -458,59 +537,38 @@
 
         peerInstance.on('error', (err) => {
           console.error("PeerJS 錯誤:", err);
-          statusBar.textContent = "⚠️ 連線失敗，請嘗試刷新";
+          statusBar.textContent = "連線失敗，請嘗試刷新";
         });
 
       } catch (err) {
         console.error("模式二串流失敗:", err);
-        statusBar.textContent = "❌ 前鏡頭開啟失敗！";
+        statusBar.textContent = "前鏡頭開啟失敗";
       }
     }
 
     function drawSimplePreview() {
       if (currentMode !== 'MODE_2_STREAM') return;
-      const cw = canvasElement.width, ch = canvasElement.height;
-      
-      canvasCtx.save();
-      canvasCtx.clearRect(0, 0, cw, ch);
-      
-      const vw = localVideo.videoWidth, vh = localVideo.videoHeight;
-      if (vw && vh) {
-        const canvasAspect = cw / ch, imgAspect = vw / vh;
-        let renderW, renderH, offsetX, offsetY;
 
-        if (imgAspect > canvasAspect) {
-          renderH = ch; renderW = vw * (ch / vh);
-          offsetX = (cw - renderW) / 2; offsetY = 0;
-        } else {
-          renderW = cw; renderH = vh * (cw / vw);
-          offsetX = 0; offsetY = (ch - renderH) / 2;
-        }
-
-        canvasCtx.translate(cw, 0);
-        canvasCtx.scale(-1, 1);
-        canvasCtx.drawImage(localVideo, cw - offsetX - renderW, offsetY, renderW, renderH);
+      if (localVideo.readyState >= 2 && localVideo.videoWidth > 0) {
+        drawVideoToCanvas(localVideo, canvasElement, canvasCtx, true);
       }
-      canvasCtx.restore();
 
       if (currentMode === 'MODE_2_STREAM') {
         requestAnimationFrame(drawSimplePreview);
       }
     }
 
-    // --- 初始化邏輯 ---
+    // 初始化邏輯
     if (targetRoomId) {
-      // 💡 如果手機是用「原生相機掃 QR Code」打開網址（帶有 room 參數）
       modeModal.style.display = 'none';
       btnSwitchMode.style.display = 'block';
       startMode2Stream();
     } else {
-      // 💡 如果直接開啟手機 App 網頁，顯示選擇視窗
       modeModal.style.display = 'flex';
       btnSwitchMode.style.display = 'none';
     }
 
-    // UI 按鈕事件
+    // UI 事件
     document.getElementById('opt_mode1').addEventListener('click', () => {
       modeModal.style.display = 'none';
       btnSwitchMode.style.display = 'block';
